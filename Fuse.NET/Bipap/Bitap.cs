@@ -34,10 +34,10 @@ namespace Fuse.NET
         private Regex _specialCharsRegex = new Regex("[\\-\\[\\]\\/\\{\\}\\(\\)\\*\\+\\?\\.\\\\\\^\\$\\|]");
 
         private Dictionary<char, int> _alphabet;
-        private FuseOptions _options;
+        private FuseOptions<T> _options;
         private string _pattern;
 
-        public Bitap(string pattern, FuseOptions options)
+        public Bitap(string pattern, FuseOptions<T> options)
         {
             _options = options;
             _pattern = options.caseSensitive ? pattern : pattern.ToLower();

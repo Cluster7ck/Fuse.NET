@@ -11,9 +11,18 @@
 using System.Text.RegularExpressions;
 using System.Collections.Generic;
 using System;
+using System.Linq;
 
 namespace Fuse.NET
 {
+    public static class LinqLikeExtension
+    {
+        public static List<FuseResult<T>> FuseSearch<T>(this IEnumerable<T> enumerable, string pattern, FuseOptions<T> options)
+        {
+            return Fuse<T>.Search(enumerable.ToList(), pattern, options);
+        }
+    }
+
     public class SearchOpts
     {
         public int limit;
@@ -34,25 +43,21 @@ namespace Fuse.NET
         public List<FuseMatch> matches;
     }
     
-    public struct SearchKey
+    public struct SearchKey<T>
     {
-        public string name;
+        public GetFunction2<T> getter;
         public float weight;
     }
 
-    public delegate int SortFunction(float a, float b);
-    public delegate object GetFunction(object source, string path);
-
-    public class FuseOptions
+    public class FuseOptions<T>
     {
-        public string id = null;
         public bool caseSensitive = false;
         public bool includeMatches = false;
         public bool includeScore = false;
         public bool shouldSort = true;
         public SortFunction sortFn = (a, b) => a.CompareTo(b);
         public GetFunction getFn;
-        public List<SearchKey> keys = new List<SearchKey>();
+        public List<SearchKey<T>> keys = new List<SearchKey<T>>();
         public bool verbose = false;
         public bool tokenize = false;
         public Regex tokenSeparator = new Regex(" +");
@@ -65,8 +70,13 @@ namespace Fuse.NET
         public bool findAllMatches = false;
     }
 
+    public delegate int SortFunction(float a, float b);
+    public delegate object GetFunction(object source, string path);
+    public delegate string GetFunction2<T>(T source);
+
     public class Fuse<T>
     {
+
         internal delegate void TransformResult(AnalyzeResult result, ref TransformData data);
 
         internal class Searchers
@@ -75,51 +85,19 @@ namespace Fuse.NET
             public Bitap<T> fullSearcher;
         }
 
-        private FuseOptions _options;
-        private List<T> _list;
-
-        public Fuse(List<T> list, FuseOptions options = null)
+        public static List<FuseResult<T>> Search(List<T> list, string pattern, FuseOptions<T> options,SearchOpts opts = null)
         {
-            _options = options != null ? options : new FuseOptions();
-
-            if (_options.getFn == null)
-            {
-                _options.getFn = DeepValue;
-            }
-
-            SetCollection(list);
-        }
-
-        public List<T> SetCollection(List<T> list)
-        {
-            _list = list;
-            return list;
-        }
-
-        public void AddKey(string name, float weight = 1f)
-        {
-            _options.keys.Add(new SearchKey
-            {
-                name = name,
-                weight = weight
-            });
-        }
-
-        public void ClearKeys()
-        {
-            _options.keys.Clear();
-        }
-
-        public List<FuseResult<T>> Search(string pattern, SearchOpts opts = null)
-        {
-            var searchers = PrepareSearchers(pattern);
-            var search = InternalSearch(searchers.tokenSearchers, searchers.fullSearcher);
+            var searchers = PrepareSearchers(pattern, options);
+            var search = InternalSearch(list, searchers.tokenSearchers, searchers.fullSearcher, options);
 
             ComputeScore(search);
 
-            if (_options.shouldSort)
+            if (options.shouldSort)
             {
-                SortSearchResults(search.results);
+                search.results.Sort((a, b) =>
+                {
+                    return options.sortFn(a.score, b.score);
+                });
             }
 
             if (opts != null)
@@ -127,15 +105,15 @@ namespace Fuse.NET
                 search.results = search.results.GetRange(0, opts.limit);
             }
 
-            return Format(search.results);
+            return Format(search.results, options);
         }
 
-        private List<FuseResult<T>> Format(List<AnalyzeResult> results)
+        private static List<FuseResult<T>> Format(List<AnalyzeResult> results, FuseOptions<T> options)
         {
             var finalOutput = new List<FuseResult<T>>();
             var transformers = new List<TransformResult>();
 
-            if (_options.includeMatches)
+            if (options.includeMatches)
             {
                 transformers.Add((AnalyzeResult result, ref TransformData data) => {
                     var output = result.output;
@@ -171,7 +149,7 @@ namespace Fuse.NET
                 });
             }
 
-            if (_options.includeScore) {
+            if (options.includeScore) {
                 transformers.Add((AnalyzeResult result, ref TransformData data) =>
                 {
                     data.score = result.score;
@@ -181,20 +159,6 @@ namespace Fuse.NET
             for (var i = 0; i < results.Count; i++)
             {
                 var result = results[i];
-
-                if (!string.IsNullOrEmpty(_options.id))
-                {
-                    var value = _options.getFn(result.item, _options.id);
-
-                    if (value is List<string>)
-                    {
-                        result.item = ((List<string>)value)[0];
-                    }
-                    else if (value is string)
-                    {
-                        result.item = value;
-                    }
-                }
 
                 if (transformers.Count == 0)
                 {
@@ -226,7 +190,7 @@ namespace Fuse.NET
             return finalOutput;
         }
 
-        private void ComputeScore(SearchResult search)
+        private static void ComputeScore(SearchResult search)
         {
             for (var i = 0; i < search.results.Count; i++)
             {
@@ -270,7 +234,7 @@ namespace Fuse.NET
             public List<AnalyzeResult> results;
         }
 
-        private SearchResult InternalSearch(List<Bitap<T>> tokenSearchers, Bitap<T> fullSearcher)
+        private static SearchResult InternalSearch(List<T> list, List<Bitap<T>> tokenSearchers, Bitap<T> fullSearcher, FuseOptions<T> options)
         {
             var resultMap = new Dictionary<int, AnalyzeResult>();
             var results = new List<AnalyzeResult>();
@@ -282,17 +246,17 @@ namespace Fuse.NET
                 fullSearcher = fullSearcher
             };
 
-            if (_list[0] is string)
+            if (list[0] is string)
             {
-                for (var i = 0; i < _list.Count; i++)
+                for (var i = 0; i < list.Count; i++)
                 {
                     Analyze(new AnalyzeOpts
                     {
                         key = "",
-                        value = (_list[i] as string),
+                        value = (list[i] as string),
                         record = i,
                         index = i
-                    }, output);
+                    }, output, options);
                 }
 
                 return new SearchResult
@@ -304,13 +268,13 @@ namespace Fuse.NET
 
             var weights = new Dictionary<string, float>();
 
-            for (var i = 0; i < _list.Count; i++)
+            for (var i = 0; i < list.Count; i++)
             {
-                var item = _list[i];
+                var item = list[i];
 
-                for (var j = 0; j < _options.keys.Count; j++)
+                for (var j = 0; j < options.keys.Count; j++)
                 {
-                    var key = _options.keys[j];
+                    var key = options.keys[j];
                     var weight = (1f - key.weight);
 
                     if (weight == 0f)
@@ -318,15 +282,15 @@ namespace Fuse.NET
                         weight = 1f;
                     }
 
-                    weights[key.name] = weight;
+                    weights[key.getter.Method.Name] = weight;
 
                     Analyze(new AnalyzeOpts
                     {
-                        key = key.name,
-                        value = _options.getFn(item, key.name),
+                        key = key.getter.Method.Name,
+                        value = key.getter.Invoke(item),
                         record = item,
                         index = i
-                    }, output);
+                    }, output, options);
                 }
             }
 
@@ -337,29 +301,21 @@ namespace Fuse.NET
             };
         }
 
-        private void SortSearchResults(List<AnalyzeResult> matches)
-        {
-            matches.Sort((a, b) =>
-            {
-                return _options.sortFn(a.score, b.score);
-            });
-        }
-
-        private Searchers PrepareSearchers(string pattern)
+        private static Searchers PrepareSearchers(string pattern, FuseOptions<T> options)
         {
             var tokenSearchers = new List<Bitap<T>>();
 
-            if (_options.tokenize)
+            if (options.tokenize)
             {
-                var tokens = _options.tokenSeparator.Split(pattern);
+                var tokens = options.tokenSeparator.Split(pattern);
 
                 for (var i = 0; i < tokens.Length; i++)
                 {
-                    tokenSearchers.Add(new Bitap<T>(tokens[i], _options));
+                    tokenSearchers.Add(new Bitap<T>(tokens[i], options));
                 }
             }
 
-            var fullSearcher = new Bitap<T>(pattern, _options);
+            var fullSearcher = new Bitap<T>(pattern, options);
 
             return new Searchers
             {
@@ -402,7 +358,7 @@ namespace Fuse.NET
             public List<AnalyzeMatch> output;
         }
 
-        private void Analyze(AnalyzeOpts opts, AnalyzeOutput output)
+        private static void Analyze(AnalyzeOpts opts, AnalyzeOutput output, FuseOptions<T> options)
         {
             if (opts.value == null)
             {
@@ -417,9 +373,9 @@ namespace Fuse.NET
             {
                 var mainSearchResult = output.fullSearcher.Search((string)opts.value);
 
-                if (_options.tokenize)
+                if (options.tokenize)
                 {
-                    var words = _options.tokenSeparator.Split((string)opts.value);
+                    var words = options.tokenSeparator.Split((string)opts.value);
                     var scores = new List<float>();
 
                     for (var i = 0; i < output.tokenSearchers.Count; i++)
@@ -441,7 +397,7 @@ namespace Fuse.NET
                             }
                             else
                             {
-                                if (!_options.matchAllTokens)
+                                if (!options.matchAllTokens)
                                 {
                                     scores.Add(1f);
                                 }
@@ -472,7 +428,7 @@ namespace Fuse.NET
                     finalScore = (finalScore + averageScore) / 2f;
                 }
 
-                var checkTextMatches = (_options.tokenize && _options.matchAllTokens) ? numTextMatches >= output.tokenSearchers.Count : true;
+                var checkTextMatches = (options.tokenize && options.matchAllTokens) ? numTextMatches >= output.tokenSearchers.Count : true;
 
                 if ((exists || mainSearchResult.isMatch) && checkTextMatches)
                 {
@@ -522,12 +478,26 @@ namespace Fuse.NET
                         value = list[i],
                         record = opts.record,
                         index = opts.index
-                    }, output);
+                    }, output, options);
 		        }
             }
 	    }
 
         private object DeepValue(object source, string path)
+        {
+            if (path.Contains("."))
+            {
+                var temp = path.Split(new char[] { '.' }, 2);
+                return DeepValue(DeepValue(source, temp[0]), temp[1]);
+            }
+            else
+            {
+                var prop = source.GetType().GetField(path);
+                return prop?.GetValue(source);
+            }
+        }
+
+        private object DeepValue2(object source, string path)
         {
             if (path.Contains("."))
             {
